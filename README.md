@@ -1,66 +1,52 @@
-## Foundry
+# Exogenous Collateralized Stablecoin Lending Protocol
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+A exogenous collateralized stablecoin lending protocol that allows users to deposit collateral and mint synthetic stablecoins (sCoin) against their collateral position.
 
-Foundry consists of:
+## Overview
 
--   **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
--   **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
--   **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
--   **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+This project implements a collateralized debt position (CDP) system where users can:
+- Deposit supported collateral tokens (WETH, WBTC)
+- Mint synthetic stablecoins (sCoin) against their collateral
+- Maintain a minimum health factor to avoid liquidation
+- Redeem their collateral by repaying debt
+- Participate in liquidations of unhealthy positions
 
-## Documentation
+## Key Features
 
-https://book.getfoundry.sh/
+### Collateral Management
+- Multi-collateral support (WETH, WBTC initially)
+- Real-time price feeds via Chainlink oracles
+- Configurable liquidation thresholds
 
-## Usage
+### Risk Management
+- Minimum health factor of 1.0 (100%)
+- Liquidation threshold at 50% of collateral value
+- Liquidation bonus of 10% to incentivize liquidators
 
-### Build
+### Core Functions
+- `depositAndMint`: Deposit collateral and mint sCoin in one transaction
+- `redeemAndBurn`: Repay sCoin and retrieve collateral
+- `liquidate`: Liquidate positions below minimum health factor
 
-```shell
-$ forge build
+## Technical Details
+
+### Smart Contracts
+
+- `Hub.sol`: Main contract handling collateral, minting, and liquidations
+- `SCoin.sol`: ERC20 implementation of the synthetic stablecoin
+
+### Testing
+
+The system includes comprehensive test coverage:
+- Unit tests for all core functions
+- Invariant fuzz tests to ensure system-wide properties
+
+### Key Invariants
+
+1. Total sCoin supply must never exceed 50% of total collateral value
+
+### Testing
+```bash
+forge test
 ```
 
-### Test
-
-```shell
-$ forge test
-```
-
-### Format
-
-```shell
-$ forge fmt
-```
-
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
