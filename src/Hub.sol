@@ -4,18 +4,26 @@ pragma solidity 0.8.28;
 import {SCoin} from "./SCoin.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ILendingPool} from "./interface/ILendingPool.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {PriceFeedValidator} from "./libraries/PriceFeedValidator.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract Hub {
+contract Hub is ILendingPool, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+    using PriceFeedValidator for AggregatorV3Interface;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
     error HUB__LengthNotMatch();
     error HUB__CollateralTokenNotSupported();
-    error HUB__TransferFailed();
     error HUB__HealthFactorTooLow();
     error HUB__HealthFactorEnough();
     error HUB__NotEnoughCollateral();
     error HUB__AmountMustBeMoreThanZero();
+    error HUB__CollateralTokenAlreadySet();
+
     /*//////////////////////////////////////////////////////////////
                          CONSTANT AND IMMUTABLE
     //////////////////////////////////////////////////////////////*/
@@ -24,7 +32,6 @@ contract Hub {
     uint256 private constant PRECISION = 1e18;
     uint256 private constant LIQUIDATION_THRESHOLD = 50;
     uint256 private constant LIQUIDATION_PRECISION = 100;
-    uint256 private constant LIQUIDATION_MAX_BONUS_THRESHOLD = 110e16;
     uint256 private constant HEALTH_FACTOR_THRESHOLD = 1e18;
     uint256 private constant BONUS = 10;
     uint256 private constant BONUS_PRECISION = 100;
@@ -44,6 +51,8 @@ contract Hub {
     event CollateralRedeem(
         address indexed redeemFrom, address indexed redeemTo, address indexed collateralToken, uint256 amountCollateral
     );
+    event SCoinMinted(address indexed user, uint256 amount);
+    event SCoinBurned(address indexed user, uint256 amount);
     /*//////////////////////////////////////////////////////////////
                                 MODIFIERS
     //////////////////////////////////////////////////////////////*/
@@ -71,9 +80,13 @@ contract Hub {
         }
         i_sCoin = SCoin(_sCoinAddress);
         s_supportedCollateralTokens = _supportedCollateralTokens;
-        for (uint256 i = 0; i < _supportedCollateralTokens.length; i++) {
-            require(s_priceFeeds[_supportedCollateralTokens[i]] == address(0), "Collateral token was already set");
-            s_priceFeeds[_supportedCollateralTokens[i]] = _priceFeeds[i];
+        uint256 length = _supportedCollateralTokens.length;
+        for (uint256 i; i != length; ++i) {
+            address collateralToken = _supportedCollateralTokens[i];
+            if (s_priceFeeds[collateralToken] != address(0)) {
+                revert HUB__CollateralTokenAlreadySet();
+            }
+            s_priceFeeds[collateralToken] = _priceFeeds[i];
         }
     }
 
@@ -86,21 +99,24 @@ contract Hub {
     /// @param _amountSCoin The amount of sCoin to mint
     function depositAndMint(address _collateralToken, uint256 _amountCollateral, uint256 _amountSCoin)
         public
+        nonReentrant
         checkCollateralTokenSupported(_collateralToken)
         moreThanZero(_amountCollateral)
     {
-        // Transfer collateral token from user to this contract
-        bool success = IERC20(_collateralToken).transferFrom(msg.sender, address(this), _amountCollateral);
-        if (!success) {
-            revert HUB__TransferFailed();
-        }
-        // Update collateral balance
+        // Effects - Update state first
         s_collateralBalances[msg.sender][_collateralToken] += _amountCollateral;
-        emit CollateralDeposit(msg.sender, _collateralToken, _amountCollateral);
-        // Mint sCoin to user
-        i_sCoin.mint(msg.sender, _amountSCoin);
-        // Update sCoin balance
         s_sCoinBalances[msg.sender] += _amountSCoin;
+
+        // Events - After state changes, before external interactions
+        emit CollateralDeposit(msg.sender, _collateralToken, _amountCollateral);
+        if (_amountSCoin > 0) {
+            emit SCoinMinted(msg.sender, _amountSCoin);
+        }
+
+        // Interactions - External calls last
+        IERC20(_collateralToken).safeTransferFrom(msg.sender, address(this), _amountCollateral);
+        i_sCoin.mint(msg.sender, _amountSCoin);
+
         _checkHealthFactor(msg.sender);
     }
 
@@ -117,9 +133,10 @@ contract Hub {
 
     /// @notice Mints new sCoin tokens to the caller
     /// @param _amountSCoin The amount of sCoin to mint
-    function mint(uint256 _amountSCoin) external moreThanZero(_amountSCoin) {
-        i_sCoin.mint(msg.sender, _amountSCoin);
+    function mint(uint256 _amountSCoin) external nonReentrant moreThanZero(_amountSCoin) {
         s_sCoinBalances[msg.sender] += _amountSCoin;
+        emit SCoinMinted(msg.sender, _amountSCoin);
+        i_sCoin.mint(msg.sender, _amountSCoin);
         _checkHealthFactor(msg.sender);
     }
 
@@ -128,7 +145,8 @@ contract Hub {
     /// @param _amountCollateral The amount of collateral to redeem
     /// @param _amountSCoin The amount of sCoin to burn
     function redeemAndBurn(address _collateralToken, uint256 _amountCollateral, uint256 _amountSCoin)
-        public
+        external
+        nonReentrant
         checkCollateralTokenSupported(_collateralToken)
     {
         _redeemAndBurn(_collateralToken, _amountCollateral, _amountSCoin, msg.sender, msg.sender);
@@ -139,6 +157,7 @@ contract Hub {
     /// @param _amountCollateral The amount of collateral to redeem
     function redeem(address _collateralToken, uint256 _amountCollateral)
         external
+        nonReentrant
         checkCollateralTokenSupported(_collateralToken)
     {
         _redeemAndBurn(_collateralToken, _amountCollateral, 0, msg.sender, msg.sender);
@@ -146,9 +165,10 @@ contract Hub {
 
     /// @notice Burns sCoin tokens from the caller
     /// @param _amountSCoin The amount of sCoin to burn
-    function burn(uint256 _amountSCoin) external moreThanZero(_amountSCoin) {
-        i_sCoin.burn(msg.sender, _amountSCoin);
+    function burn(uint256 _amountSCoin) external nonReentrant moreThanZero(_amountSCoin) {
         s_sCoinBalances[msg.sender] -= _amountSCoin;
+        emit SCoinBurned(msg.sender, _amountSCoin);
+        i_sCoin.burn(msg.sender, _amountSCoin);
         _checkHealthFactor(msg.sender);
     }
 
@@ -159,8 +179,12 @@ contract Hub {
     /// @dev Liquidator receives a bonus of collateral tokens for performing the liquidation
     function liquidate(address _collateralToken, address _user, uint256 _debtAmount)
         external
+        nonReentrant
         moreThanZero(_debtAmount)
     {
+        // Cache storage reads
+        uint256 userCollateralBalance = s_collateralBalances[_user][_collateralToken];
+
         uint256 initialHealthFactor = _getHealthFactor(_user);
         if (initialHealthFactor >= HEALTH_FACTOR_THRESHOLD) {
             revert HUB__HealthFactorEnough();
@@ -168,14 +192,13 @@ contract Hub {
 
         uint256 tokenAmount = getCollateralTokenAmount(_collateralToken, _debtAmount);
         uint256 tokenAmountPlusBonus = _addBonus(tokenAmount);
-        uint256 depositedCollateralAmount = s_collateralBalances[_user][_collateralToken];
 
         // If health factor is between 100-110%, maximize the liquidation amount
-        if (tokenAmount < depositedCollateralAmount && tokenAmountPlusBonus > depositedCollateralAmount) {
-            tokenAmountPlusBonus = depositedCollateralAmount;
+        if (tokenAmount < userCollateralBalance && tokenAmountPlusBonus > userCollateralBalance) {
+            tokenAmountPlusBonus = userCollateralBalance;
         }
 
-        if (tokenAmountPlusBonus > depositedCollateralAmount) {
+        if (tokenAmountPlusBonus > userCollateralBalance) {
             revert HUB__NotEnoughCollateral();
         }
         _redeemAndBurn(_collateralToken, tokenAmountPlusBonus, _debtAmount, _user, msg.sender);
@@ -205,7 +228,8 @@ contract Hub {
     /// @return The total collateral value in USD (scaled by PRECISION)
     function getCollateralValueInUSDForUser(address _user) public view returns (uint256) {
         uint256 totalCollateralValue = 0;
-        for (uint256 i = 0; i < s_supportedCollateralTokens.length; i++) {
+        uint256 length = s_supportedCollateralTokens.length;
+        for (uint256 i; i != length; ++i) {
             address collateralToken = s_supportedCollateralTokens[i];
             uint256 collateralAmount = s_collateralBalances[_user][collateralToken];
             uint256 price = _getPriceFromChainlink(collateralToken);
@@ -219,7 +243,7 @@ contract Hub {
     /// @param _user The address of the user to check
     /// @param _collateralToken The address of the collateral token
     /// @return The amount of collateral tokens deposited
-    function getCollateralAmountForUser(address _user, address _collateralToken) public view returns (uint256) {
+    function getCollateralAmountForUser(address _user, address _collateralToken) external view returns (uint256) {
         return s_collateralBalances[_user][_collateralToken];
     }
 
@@ -227,7 +251,7 @@ contract Hub {
     /// @param _collateralToken The address of the collateral token
     /// @param _tokenAmount The amount of tokens to check
     /// @return The USD value scaled by PRECISION
-    function getTokenValueInUSD(address _collateralToken, uint256 _tokenAmount) public view returns (uint256) {
+    function getTokenValueInUSD(address _collateralToken, uint256 _tokenAmount) external view returns (uint256) {
         uint256 tokenPrice = _getPriceFromChainlink(_collateralToken);
         return _tokenAmount * tokenPrice / PRECISION;
     }
@@ -262,17 +286,23 @@ contract Hub {
         address from,
         address to
     ) private checkCollateralTokenSupported(_collateralToken) {
+        // Checks
         if (_amountCollateral > s_collateralBalances[from][_collateralToken]) {
             revert HUB__NotEnoughCollateral();
         }
-        s_collateralBalances[from][_collateralToken] -= _amountCollateral;
-        bool success = IERC20(_collateralToken).transfer(to, _amountCollateral);
-        if (!success) {
-            revert HUB__TransferFailed();
-        }
-        emit CollateralRedeem(address(this), to, _collateralToken, _amountCollateral);
 
+        // Effects - Update state first
+        s_collateralBalances[from][_collateralToken] -= _amountCollateral;
         s_sCoinBalances[from] -= _amountSCoin;
+
+        // Events - After state changes, before external interactions
+        emit CollateralRedeem(from, to, _collateralToken, _amountCollateral);
+        if (_amountSCoin > 0) {
+            emit SCoinBurned(from, _amountSCoin);
+        }
+
+        // Interactions - External calls last
+        IERC20(_collateralToken).safeTransfer(to, _amountCollateral);
         i_sCoin.burn(to, _amountSCoin);
 
         _checkHealthFactor(from);
@@ -304,10 +334,7 @@ contract Hub {
     /// @param _collateralToken The token address to get price for
     /// @return The price normalized to 18 decimals
     function _getPriceFromChainlink(address _collateralToken) private view returns (uint256) {
-        // Call Chainlink price feed
         AggregatorV3Interface priceFeed = AggregatorV3Interface(s_priceFeeds[_collateralToken]);
-        (, int256 price,,,) = priceFeed.latestRoundData();
-        uint8 decimals = priceFeed.decimals();
-        return uint256(price) * (10 ** uint256(18 - decimals));
+        return priceFeed.validateAndGetPrice();
     }
 }

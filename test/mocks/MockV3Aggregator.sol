@@ -10,59 +10,55 @@ pragma solidity ^0.8.0;
  * its answer is unimportant
  */
 contract MockV3Aggregator {
-    uint256 public constant version = 0;
-
     uint8 public decimals;
-    int256 public latestAnswer;
-    uint256 public latestTimestamp;
-    uint256 public latestRound;
-
-    mapping(uint256 => int256) public getAnswer;
-    mapping(uint256 => uint256) public getTimestamp;
-    mapping(uint256 => uint256) private getStartedAt;
+    int256 private s_answer;
+    uint80 private s_roundId;
+    uint256 private s_timestamp;
+    uint80 private s_answeredInRound;
 
     constructor(uint8 _decimals, int256 _initialAnswer) {
         decimals = _decimals;
-        updateAnswer(_initialAnswer);
+        s_answer = _initialAnswer;
+        s_roundId = 1;
+        s_timestamp = block.timestamp;
+        s_answeredInRound = 1;
     }
 
-    function updateAnswer(int256 _answer) public {
-        latestAnswer = _answer;
-        latestTimestamp = block.timestamp;
-        latestRound++;
-        getAnswer[latestRound] = _answer;
-        getTimestamp[latestRound] = block.timestamp;
-        getStartedAt[latestRound] = block.timestamp;
+    function updateAnswer(int256 _answer) external {
+        s_roundId++;
+        s_answer = _answer;
+        s_timestamp = block.timestamp;
+        s_answeredInRound = s_roundId;
     }
 
-    function updateRoundData(uint80 _roundId, int256 _answer, uint256 _timestamp, uint256 _startedAt) public {
-        latestRound = _roundId;
-        latestAnswer = _answer;
-        latestTimestamp = _timestamp;
-        getAnswer[latestRound] = _answer;
-        getTimestamp[latestRound] = _timestamp;
-        getStartedAt[latestRound] = _startedAt;
-    }
-
-    function getRoundData(uint80 _roundId)
-        external
-        view
-        returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
-    {
-        return (_roundId, getAnswer[_roundId], getStartedAt[_roundId], getTimestamp[_roundId], _roundId);
+    function setRoundData(
+        uint80 _roundId,
+        int256 _answer,
+        uint80 _answeredInRound
+    ) external {
+        s_roundId = _roundId;
+        s_answer = _answer;
+        s_timestamp = block.timestamp;
+        s_answeredInRound = _answeredInRound;
     }
 
     function latestRoundData()
         external
         view
-        returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
+        returns (
+            uint80 roundId,
+            int256 answer,
+            uint256 startedAt,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        )
     {
         return (
-            uint80(latestRound),
-            getAnswer[latestRound],
-            getStartedAt[latestRound],
-            getTimestamp[latestRound],
-            uint80(latestRound)
+            s_roundId,
+            s_answer,
+            s_timestamp,
+            s_timestamp,
+            s_answeredInRound
         );
     }
 
